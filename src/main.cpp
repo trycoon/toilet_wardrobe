@@ -1,7 +1,8 @@
+#include <Arduino.h>
+#include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
-#include <ArduinoOTA.h>
 #include <AsyncMqttClient.h>
 
 /*
@@ -29,7 +30,7 @@ const char* MQTT_USERNAME = APP_NAME;
 const char* MQTT_PASSWORD = "";
 const IPAddress MQTT_SERVER = (192, 168, 10, 110);
 const uint16_t MQTT_PORT = 1883;
-const char* MQTT_TOPIC = "home/" + APP_NAME;
+const char MQTT_TOPIC[] = "jel/events";
 
 // https://diarmuid.ie/blog/pwm-exponential-led-fading-on-arduino-or-other-platforms/
 // The number of Steps between the output being on and off
@@ -94,15 +95,10 @@ void setup() {
   // Port defaults to 8266
   // ArduinoOTA.setPort(8266);
 
-  // Hostname defaults to esp8266-[ChipID]
   ArduinoOTA.setHostname(APP_NAME);
 
   // authentication string
   ArduinoOTA.setPassword(OTA_PASSWORD);
-
-  // Password can be set with it's md5 value as well
-  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
 
   ArduinoOTA.onStart([]() {
     String type;
@@ -113,11 +109,11 @@ void setup() {
 
     // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
     Serial.println("Start updating " + type);
-    publish_message("Start updating firmare.");
+    publish_message("START UPDATING FIRMWARE");
   });
   ArduinoOTA.onEnd([]() {
     Serial.println("\nEnd");
-    publish_message("Done updating firmare.");
+    publish_message("DONE UPDATING FIRMWARE");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
@@ -161,7 +157,9 @@ void loop() {
       resultString += sensor_last_state ? "true": "false";
       Serial.println(resultString);
 
-      publish_message("Toilet occupied " + (sensor_last_state ? "true": "false"));
+      char msg[] = "";
+      strcat(msg, sensor_last_state ? "TOILET OCCUPIED": "TOILET FREE");
+      publish_message(msg);
     }
   }
 
@@ -175,7 +173,7 @@ void loop() {
 
   if (digitalRead(WARDROBE_PIR_PIN) == HIGH && wardrobe_motion_detected == false) {
     Serial.println("Wardrobe motion detected.");
-    publish_message("Wardrobe motion detected");
+    publish_message("WARDROBE MOTION DETECTED");
     wardrobe_motion_detected = true;
   }
 
@@ -251,12 +249,20 @@ void onMqttConnect(bool sessionPresent) {
   Serial.println("Connected to the MQTT broker.");
   Serial.print("Session present: ");
   Serial.println(sessionPresent);
-  publish_message(APP_NAME + " CONNECTED");
+  publish_message("CONNECTED");
 }
 
-void publish_message(char const * msg) {
-  uint16_t packetIdPub1 = mqttClient.publish(MQTT_TOPIC, 1, true, msg);
-  Serial.println(packetIdPub1);
+void publish_message(char* msg) {
+  if (mqttClient.connected()) {
+    char pubmsg[] = "{\"source\":\"";
+    strcat(pubmsg, APP_NAME);
+    strcat(pubmsg, "\",\"data\":\"");
+    strcat(pubmsg, msg);
+    strcat(pubmsg, "\"}");
+
+    uint16_t packetIdPub1 = mqttClient.publish(MQTT_TOPIC, 1, true, pubmsg);
+    Serial.println(packetIdPub1);
+  }
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
