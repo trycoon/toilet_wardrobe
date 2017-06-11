@@ -4,40 +4,14 @@
 #include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <AsyncMqttClient.h>
+#include <main.h>
 
 /*
- * Simple Arduino sketch that crossfades between two LEDs
+ * Simple NodeMCU sketch that crossfades between two LEDs
  * depending on the status of a transmissive sensor.
  * This it used to visualize if the toilet i free or not.
  * The sketch also fades a additional LED depending on detection on motion from another sensor.
  */
-
-const uint8_t FREE_LED_PIN = 6;
-const uint8_t OCCUPIED_LED_PIN = 5;
-const uint8_t SENSOR_PIN = 4;   // HIGH=occupied.
-const uint8_t BRIGHTNESS = 150;
-const uint8_t WARDROBE_PIR_PIN = 8;
-const uint8_t WARDROBE_LED_PIN = 9;
-const uint32_t WARDROBE_ON_DELAY = 10000;
-const char* APP_NAME = "toilet-wardrobe";
-
-const char* SSID = "";
-const char* WIFI_PASSWORD = "";
-
-const char* OTA_PASSWORD = "";
-
-const char* MQTT_USERNAME = APP_NAME;
-const char* MQTT_PASSWORD = "";
-const IPAddress MQTT_SERVER = (192, 168, 10, 110);
-const uint16_t MQTT_PORT = 1883;
-const char MQTT_TOPIC[] = "jel/events";
-
-// https://diarmuid.ie/blog/pwm-exponential-led-fading-on-arduino-or-other-platforms/
-// The number of Steps between the output being on and off
-const uint8_t OCCUPIED_PWM_INTERVALS = 50;
-const float OCCUPIED_FADE_RATIO = (OCCUPIED_PWM_INTERVALS * log10(2))/(log10(BRIGHTNESS));
-const uint8_t WARDROOBE_PWM_INTERVALS = 50;
-const float WARDROBE_FADE_RATIO = (WARDROOBE_PWM_INTERVALS * log10(2))/(log10(255));
 
 uint8_t free_led_strength;
 uint8_t occupied_led_strength;
@@ -49,27 +23,16 @@ uint32_t wardrobe_delay;
 
 AsyncMqttClient mqttClient;
 
-// function declarations
-void set_free(boolean animate);
-void set_occupied(boolean animate);
-void update_led();
-void update_wardrobe_fade();
-void onMqttConnect(bool sessionPresent);
-void onMqttDisconnect(AsyncMqttClientDisconnectReason reason);
-void onMqttPublish(uint16_t packetId);
-void publish_message(char* msg);
-
-
 void setup() {
   Serial.begin(115200);
-  Serial.println("Toilet free indicator and wardrobe manager v1.0");
+  Serial.println("Toilet free indicator and wardrobe manager v1.1");
 
   pinMode(FREE_LED_PIN, OUTPUT);
   pinMode(OCCUPIED_LED_PIN, OUTPUT);
-  pinMode(SENSOR_PIN, INPUT);
+  pinMode(SENSOR_PIN, INPUT_PULLUP);
 
   pinMode(WARDROBE_LED_PIN, OUTPUT);
-  pinMode(WARDROBE_PIR_PIN, INPUT);
+  pinMode(WARDROBE_PIR_PIN, INPUT_PULLUP);
 
   // get initial status from sensor
   sensor_last_state = digitalRead(SENSOR_PIN);
@@ -82,7 +45,12 @@ void setup() {
 
   update_led();
 
-  // connect to WiFi accesspoint
+  setup_WiFi();
+  setup_OTA();
+  setup_MQTT();
+}
+
+void setup_WiFi() {
   WiFi.hostname(APP_NAME);
   WiFi.mode(WIFI_STA);
   WiFi.begin(SSID, WIFI_PASSWORD);
@@ -91,9 +59,11 @@ void setup() {
     delay(5000);
     ESP.restart();
   }
+}
 
+void setup_OTA() {
   // Port defaults to 8266
-  // ArduinoOTA.setPort(8266);
+  ArduinoOTA.setPort(8266);
 
   ArduinoOTA.setHostname(APP_NAME);
 
@@ -111,13 +81,16 @@ void setup() {
     Serial.println("Start updating " + type);
     publish_message("START UPDATING FIRMWARE");
   });
+
   ArduinoOTA.onEnd([]() {
     Serial.println("\nEnd");
     publish_message("DONE UPDATING FIRMWARE");
   });
+
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
   });
+
   ArduinoOTA.onError([](ota_error_t error) {
     Serial.printf("Error[%u]: ", error);
     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
@@ -126,19 +99,23 @@ void setup() {
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
+
   ArduinoOTA.begin();
-  Serial.println("Ready");
+  Serial.println("OTA Ready");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+}
 
-  // MQTT stuff
+void setup_MQTT() {
   mqttClient.onConnect(onMqttConnect);
   mqttClient.onDisconnect(onMqttDisconnect);
   mqttClient.onPublish(onMqttPublish);
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-  mqttClient.setCredentials(MQTT_USERNAME, MQTT_PASSWORD);
+  //mqttClient.setCredentials("MQTT_USERNAME", "MQTT_PASSWORD");
+  mqttClient.setKeepAlive(15); // seconds
   mqttClient.setClientId(APP_NAME);
-  Serial.println("Connecting to MQTT...");
+  mqttClient.setWill(MQTT_TOPIC, 2, true, "DISCONNECTED");
+  Serial.println("Connecting to MQTT broker...");
   mqttClient.connect();
 }
 
@@ -244,29 +221,23 @@ void update_wardrobe_fade() {
   analogWrite(WARDROBE_LED_PIN, 255 - (pow (2, (wardrobe_led_strength / WARDROBE_FADE_RATIO)) - 1));       // invert values, 255=full bright light, 0=light off.
 }
 
-
 void onMqttConnect(bool sessionPresent) {
+  mqttClient.publish(MQTT_TOPIC, 1, true, "CONNECTED");
   Serial.println("Connected to the MQTT broker.");
   Serial.print("Session present: ");
   Serial.println(sessionPresent);
-  publish_message("CONNECTED");
 }
 
 void publish_message(char* msg) {
   if (mqttClient.connected()) {
-    char pubmsg[] = "{\"source\":\"";
-    strcat(pubmsg, APP_NAME);
-    strcat(pubmsg, "\",\"data\":\"");
-    strcat(pubmsg, msg);
-    strcat(pubmsg, "\"}");
-
-    uint16_t packetIdPub1 = mqttClient.publish(MQTT_TOPIC, 1, true, pubmsg);
+    uint16_t packetIdPub1 = mqttClient.publish(MQTT_TOPIC, 1, true, msg);
     Serial.println(packetIdPub1);
   }
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  Serial.println("Disconnected from the MQTT broker!");
+  Serial.print("Disconnected from the MQTT broker! reason: ");
+  Serial.println(static_cast<uint8_t>(reason));
   Serial.println("Reconnecting to MQTT...");
   mqttClient.connect();
 }
